@@ -57,7 +57,7 @@ def test_image_cast_storage_with_large_binary():
 
     expected_type = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
     assert casted.type == expected_type
-    assert image.pa_type == expected_type
+    assert image() == expected_type
     assert casted.to_pylist() == [{"bytes": b"abc", "path": None}]
 
 
@@ -68,7 +68,7 @@ def test_image_cast_storage_with_large_string():
 
     expected_type = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
     assert casted.type == expected_type
-    assert image.pa_type == expected_type
+    assert image() == expected_type
     assert casted.to_pylist() == [{"bytes": None, "path": "/tmp/image.jpg"}]
 
 
@@ -79,7 +79,7 @@ def test_image_cast_storage_with_binary_backwards_compatible():
 
     expected_type = pa.struct({"bytes": pa.binary(), "path": pa.string()})
     assert casted.type == expected_type
-    assert image.pa_type == expected_type
+    assert image() == expected_type
     assert casted.to_pylist() == [{"bytes": b"abc", "path": None}]
 
 
@@ -93,7 +93,7 @@ def test_image_cast_storage_with_large_struct():
 
     expected_type = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
     assert casted.type == expected_type
-    assert image.pa_type == expected_type
+    assert image() == expected_type
     assert casted.to_pylist() == [{"bytes": b"abc", "path": "/tmp/image.jpg"}]
 
 

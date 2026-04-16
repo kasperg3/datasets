@@ -95,14 +95,14 @@ class Image:
     _type: str = field(default="Image", init=False, repr=False)
 
     def __post_init__(self):
-        self.pa_type = _IMAGE_PA_TYPE
+        self._target_pa_type = self.pa_type
 
     def __call__(self):
-        return self.pa_type
+        return self._target_pa_type
 
     def _get_target_pa_type(self, storage: Optional[pa.Array] = None) -> pa.StructType:
         if storage is None:
-            return self.pa_type
+            return self._target_pa_type
         storage_type = storage.type
         if pa.types.is_large_string(storage_type) or pa.types.is_large_binary(storage_type):
             return _IMAGE_LARGE_PA_TYPE
@@ -256,20 +256,24 @@ class Image:
             `pa.StructArray`: Array in the Image arrow storage type, that is
                 `pa.struct({"bytes": pa.binary(), "path": pa.string()})`.
         """
-        target_pa_type = self._get_target_pa_type(storage)
         if pa.types.is_large_string(storage.type):
+            target_pa_type = self._get_target_pa_type(storage)
             bytes_array = pa.array([None] * len(storage), type=target_pa_type.field("bytes").type)
             storage = pa.StructArray.from_arrays([bytes_array, storage], ["bytes", "path"], mask=storage.is_null())
         if pa.types.is_string(storage.type):
+            target_pa_type = self._get_target_pa_type(storage)
             bytes_array = pa.array([None] * len(storage), type=target_pa_type.field("bytes").type)
             storage = pa.StructArray.from_arrays([bytes_array, storage], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_large_binary(storage.type):
+            target_pa_type = self._get_target_pa_type(storage)
             path_array = pa.array([None] * len(storage), type=target_pa_type.field("path").type)
             storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_binary(storage.type):
+            target_pa_type = self._get_target_pa_type(storage)
             path_array = pa.array([None] * len(storage), type=target_pa_type.field("path").type)
             storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_struct(storage.type):
+            target_pa_type = self._get_target_pa_type(storage)
             if storage.type.get_field_index("bytes") >= 0:
                 bytes_array = storage.field("bytes")
             else:
@@ -282,6 +286,7 @@ class Image:
             path_array = array_cast(path_array, target_pa_type.field("path").type)
             storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_list(storage.type):
+            target_pa_type = self._get_target_pa_type(storage)
             bytes_array = pa.array(
                 [encode_np_array(np.array(arr))["bytes"] if arr is not None else None for arr in storage.to_pylist()],
                 type=target_pa_type.field("bytes").type,
@@ -291,7 +296,7 @@ class Image:
                 [bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null()
             )
         target_pa_type = self._get_target_pa_type(storage)
-        self.pa_type = target_pa_type
+        self._target_pa_type = target_pa_type
         return array_cast(storage, target_pa_type)
 
     def embed_storage(self, storage: pa.StructArray, token_per_repo_id=None) -> pa.StructArray:
@@ -329,9 +334,11 @@ class Image:
         path_array = pa.array(
             [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
         )
-        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null())
         target_pa_type = self._get_target_pa_type(storage)
-        self.pa_type = target_pa_type
+        bytes_array = array_cast(bytes_array, target_pa_type.field("bytes").type)
+        path_array = array_cast(path_array, target_pa_type.field("path").type)
+        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null())
+        self._target_pa_type = target_pa_type
         return array_cast(storage, target_pa_type)
 
 
