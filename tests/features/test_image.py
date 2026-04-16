@@ -37,7 +37,7 @@ def test_image_instantiation():
     image = Image()
     assert image.id is None
     assert image.dtype == "PIL.Image.Image"
-    assert image.pa_type == pa.struct({"bytes": pa.binary(), "path": pa.string()})
+    assert image.pa_type == pa.struct({"bytes": pa.large_binary(), "path": pa.string()})
     assert image._type == "Image"
 
 
@@ -712,3 +712,60 @@ def test_encode_np_array(array, dtype_cast, expected_image_format):
     decoded_image = Image().decode_example(encoded_image)
     assert decoded_image.format == expected_image_format
     np.testing.assert_array_equal(np.array(decoded_image), array)
+
+
+@require_pil
+def test_image_embed_storage_large_binary_fallback(shared_datadir, monkeypatch):
+    """Regression test for huggingface/datasets#5717.
+
+    When embedded image bytes exceed PyArrow's 2 GB binary() limit,
+    embed_storage must fall back to large_binary() instead of raising.
+    """
+    image_path = str(shared_datadir / "test_image_rgb.jpg")
+    example = {"bytes": None, "path": image_path}
+    storage = pa.array([example], type=pa.struct({"bytes": pa.binary(), "path": pa.string()}))
+
+    _original_pa_array = pa.array
+
+    def _pa_array_binary_overflow(values, *args, **kwargs):
+        if kwargs.get("type") == pa.binary():
+            raise pa.ArrowCapacityError("BinaryArray cannot contain more than 2147483646 bytes, have 2147483648")
+        return _original_pa_array(values, *args, **kwargs)
+
+    monkeypatch.setattr(pa, "array", _pa_array_binary_overflow)
+
+    embedded_storage = Image().embed_storage(storage)
+    embedded_example = embedded_storage.to_pylist()[0]
+    assert embedded_example["bytes"] == open(image_path, "rb").read()
+    assert embedded_example["path"] == "test_image_rgb.jpg"
+
+
+@require_pil
+def test_image_cast_storage_large_binary():
+    """cast_storage handles a bare pa.large_binary() array (the new storage path)."""
+    image_path = str(Path(__file__).parent / "data" / "test_image_rgb.jpg")
+    image_bytes = open(image_path, "rb").read()
+    large_binary_array = pa.array([image_bytes], type=pa.large_binary())
+
+    casted = Image().cast_storage(large_binary_array)
+    result = casted.to_pylist()[0]
+    assert result["bytes"] == image_bytes
+    assert result["path"] is None
+
+
+@require_pil
+def test_image_cast_storage_old_binary_struct_compat():
+    """Backward compatibility: a struct with pa.binary() bytes (old format) must
+    still be castable to the current Image pa_type which uses large_binary."""
+    image_path = str(Path(__file__).parent / "data" / "test_image_rgb.jpg")
+    image_bytes = open(image_path, "rb").read()
+
+    old_storage = pa.array(
+        [{"bytes": image_bytes, "path": "test.png"}],
+        type=pa.struct({"bytes": pa.binary(), "path": pa.string()}),
+    )
+
+    casted = Image().cast_storage(old_storage)
+    result = casted.to_pylist()[0]
+    assert result["bytes"] == image_bytes
+    assert result["path"] == "test.png"

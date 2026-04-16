@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 
 _IMAGE_COMPRESSION_FORMATS: Optional[list[str]] = None
 _NATIVE_BYTEORDER = "<" if sys.byteorder == "little" else ">"
+_BINARY_SIZE_ERROR_MARKERS = (
+    "BinaryArray cannot contain more than",
+    "offset overflow",
+    "array cannot contain more than",
+)
 # Origin: https://github.com/python-pillow/Pillow/blob/698951e19e19972aeed56df686868f1329981c12/src/PIL/Image.py#L3126 minus "|i1" which values are not preserved correctly when saving and loading an image
 _VALID_IMAGE_ARRAY_DTPYES = [
     np.dtype("|b1"),
@@ -89,7 +94,7 @@ class Image:
     id: Optional[str] = field(default=None, repr=False)
     # Automatically constructed
     dtype: ClassVar[str] = "PIL.Image.Image"
-    pa_type: ClassVar[Any] = pa.struct({"bytes": pa.binary(), "path": pa.string()})
+    pa_type: ClassVar[Any] = pa.struct({"bytes": pa.large_binary(), "path": pa.string()})
     _type: str = field(default="Image", init=False, repr=False)
 
     def __call__(self):
@@ -243,9 +248,12 @@ class Image:
             bytes_array = pa.array([None] * len(storage), type=pa.binary())
             storage = pa.StructArray.from_arrays([bytes_array, storage], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_large_binary(storage.type):
-            storage = array_cast(
-                storage, pa.binary()
-            )  # this can fail in case of big images, paths should be used instead
+            # Keep large_binary when the payload is too large for binary()'s 2GB limit.
+            try:
+                storage = array_cast(storage, pa.binary())
+            except (pa.ArrowInvalid, pa.ArrowCapacityError) as e:
+                if not any(marker in str(e) for marker in _BINARY_SIZE_ERROR_MARKERS):
+                    raise
             path_array = pa.array([None] * len(storage), type=pa.string())
             storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
         elif pa.types.is_binary(storage.type):
@@ -267,9 +275,10 @@ class Image:
                 type=pa.binary(),
             )
             path_array = pa.array([None] * len(storage), type=pa.string())
-            storage = pa.StructArray.from_arrays(
-                [bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null()
-            )
+            mask = bytes_array.is_null()
+            if isinstance(mask, pa.ChunkedArray):
+                mask = mask.combine_chunks()
+            storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=mask)
         return array_cast(storage, self.pa_type)
 
     def embed_storage(self, storage: pa.StructArray, token_per_repo_id=None) -> pa.StructArray:
@@ -286,6 +295,9 @@ class Image:
         if token_per_repo_id is None:
             token_per_repo_id = {}
 
+        if isinstance(storage, pa.ChunkedArray):
+            storage = storage.combine_chunks()
+
         @no_op_if_value_is_null
         def path_to_bytes(path):
             source_url = path.split("::")[-1]
@@ -298,18 +310,33 @@ class Image:
             with xopen(path, "rb", download_config=download_config) as f:
                 return f.read()
 
-        bytes_array = pa.array(
-            [
-                (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
-                for x in storage.to_pylist()
-            ],
-            type=pa.binary(),
-        )
+        bytes_values = [
+            (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
+            for x in storage.to_pylist()
+        ]
+
+        # Temporary workaround: automatically switch to large_binary when pyarrow
+        # hits binary() buffer limits on large image batches.
+        try:
+            bytes_array = pa.array(bytes_values, type=pa.binary())
+        except (pa.ArrowInvalid, pa.ArrowCapacityError) as e:
+            if not any(marker in str(e) for marker in _BINARY_SIZE_ERROR_MARKERS):
+                raise
+            bytes_array = pa.array(bytes_values, type=pa.large_binary())
         path_array = pa.array(
             [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
             type=pa.string(),
         )
-        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null())
+        if isinstance(bytes_array, pa.ChunkedArray):
+            bytes_array = bytes_array.cast(pa.large_binary()).combine_chunks()
+        elif pa.types.is_binary(bytes_array.type):
+            bytes_array = pa.array(bytes_array.to_pylist(), type=pa.binary())
+        else:
+            bytes_array = pa.array(bytes_array.to_pylist(), type=pa.large_binary())
+        if isinstance(path_array, pa.ChunkedArray):
+            path_array = pa.array(path_array.to_pylist(), type=pa.string())
+        null_mask = pa.array(bytes_array.is_null().to_pylist(), type=pa.bool_())
+        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=null_mask)
         return array_cast(storage, self.pa_type)
 
 
