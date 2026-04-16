@@ -2140,13 +2140,21 @@ def embed_array_storage(array: pa.Array, feature: "FeatureType", token_per_repo_
         # feature must be either List(subfeature)
         # Merge offsets with the null bitmap to avoid the "Null bitmap with offsets slice not supported" ArrowNotImplementedError
         array_offsets = _combine_list_array_offsets_with_mask(array)
+        start = array.offsets[0].as_py()
+        if start:
+            array_offsets = pc.subtract(array_offsets, pa.scalar(start, type=array_offsets.type))
+        array_values = array.values[start : array.offsets[-1].as_py()]
         if isinstance(feature, List) and feature.length == -1:
-            return pa.ListArray.from_arrays(array_offsets, _e(array.values, feature.feature))
+            return pa.ListArray.from_arrays(array_offsets, _e(array_values, feature.feature))
     elif pa.types.is_large_list(array.type):
         # feature must be LargeList(subfeature)
         # Merge offsets with the null bitmap to avoid the "Null bitmap with offsets slice not supported" ArrowNotImplementedError
         array_offsets = _combine_list_array_offsets_with_mask(array)
-        return pa.LargeListArray.from_arrays(array_offsets, _e(array.values, feature.feature))
+        start = array.offsets[0].as_py()
+        if start:
+            array_offsets = pc.subtract(array_offsets, pa.scalar(start, type=array_offsets.type))
+        array_values = array.values[start : array.offsets[-1].as_py()]
+        return pa.LargeListArray.from_arrays(array_offsets, _e(array_values, feature.feature))
     elif pa.types.is_fixed_size_list(array.type):
         # feature must be List(subfeature)
         if isinstance(feature, List) and feature.length > -1:

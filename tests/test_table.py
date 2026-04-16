@@ -1395,6 +1395,41 @@ def test_embed_array_storage_with_list_types(array, feature, expected_embedded_a
     assert embedded_images_array.to_pylist() == [[{"bytes": b"image_bytes", "path": "image_path"}]]
 
 
+@pytest.mark.parametrize(
+    "array, feature, expected_embedded_array_type",
+    [
+        (
+            pa.array(
+                [[{"path": "image_path_0"}], [{"path": "image_path_1"}], [{"path": "image_path_2"}]],
+                type=pa.list_(Image.pa_type),
+            ).slice(1, 1),
+            List(Image()),
+            pa.types.is_list,
+        ),
+        (
+            pa.array(
+                [[{"path": "image_path_0"}], [{"path": "image_path_1"}], [{"path": "image_path_2"}]],
+                type=pa.large_list(Image.pa_type),
+            ).slice(1, 1),
+            LargeList(Image()),
+            pa.types.is_large_list,
+        ),
+    ],
+)
+def test_embed_array_storage_with_sliced_list_types(array, feature, expected_embedded_array_type, monkeypatch):
+    mock_embed_storage = MagicMock(
+        return_value=pa.StructArray.from_arrays(
+            [pa.array([b"image_bytes"], type=pa.binary()), pa.array(["image_path"], type=pa.string())],
+            ["bytes", "path"],
+        )
+    )
+    monkeypatch.setattr(Image, "embed_storage", mock_embed_storage)
+    embedded_images_array = embed_array_storage(array, feature)
+    assert expected_embedded_array_type(embedded_images_array.type)
+    assert embedded_images_array.to_pylist() == [[{"bytes": b"image_bytes", "path": "image_path"}]]
+    assert len(mock_embed_storage.call_args.args[0]) == 1
+
+
 def test_embed_table_storage(image_file):
     features = Features({"image": Image()})
     table = table_cast(pa.table({"image": [image_file]}), features.arrow_schema)
