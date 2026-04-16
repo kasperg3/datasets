@@ -1427,6 +1427,7 @@ def test_embed_array_storage_with_sliced_list_types(array, feature, expected_emb
     embedded_images_array = embed_array_storage(array, feature)
     assert expected_embedded_array_type(embedded_images_array.type)
     assert embedded_images_array.to_pylist() == [[{"bytes": b"image_bytes", "path": "image_path"}]]
+    assert mock_embed_storage.call_args.args[0].to_pylist() == [{"bytes": None, "path": "image_path_1"}]
     assert len(mock_embed_storage.call_args.args[0]) == 1
 
 

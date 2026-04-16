@@ -1826,6 +1826,15 @@ def _combine_list_array_offsets_with_mask(array: pa.ListArray) -> pa.Array:
     return offsets
 
 
+def _slice_list_array_values_and_rebase_offsets(array: pa.ListArray) -> tuple[pa.Array, pa.Array]:
+    """Get list offsets and values constrained to the array slice."""
+    offsets = _combine_list_array_offsets_with_mask(array)
+    start = array.offsets[0].as_py()
+    if start:
+        offsets = pc.subtract(offsets, pa.scalar(start, type=offsets.type))
+    return offsets, array.values[start : array.offsets[-1].as_py()]
+
+
 def _storage_type(type: pa.DataType) -> pa.DataType:
     """Convert a (possibly nested) `pa.ExtensionType` to its storage type."""
     if isinstance(type, pa.ExtensionType):
@@ -2139,21 +2148,13 @@ def embed_array_storage(array: pa.Array, feature: "FeatureType", token_per_repo_
     elif pa.types.is_list(array.type):
         # feature must be either List(subfeature)
         # Merge offsets with the null bitmap to avoid the "Null bitmap with offsets slice not supported" ArrowNotImplementedError
-        array_offsets = _combine_list_array_offsets_with_mask(array)
-        start = array.offsets[0].as_py()
-        if start:
-            array_offsets = pc.subtract(array_offsets, pa.scalar(start, type=array_offsets.type))
-        array_values = array.values[start : array.offsets[-1].as_py()]
+        array_offsets, array_values = _slice_list_array_values_and_rebase_offsets(array)
         if isinstance(feature, List) and feature.length == -1:
             return pa.ListArray.from_arrays(array_offsets, _e(array_values, feature.feature))
     elif pa.types.is_large_list(array.type):
         # feature must be LargeList(subfeature)
         # Merge offsets with the null bitmap to avoid the "Null bitmap with offsets slice not supported" ArrowNotImplementedError
-        array_offsets = _combine_list_array_offsets_with_mask(array)
-        start = array.offsets[0].as_py()
-        if start:
-            array_offsets = pc.subtract(array_offsets, pa.scalar(start, type=array_offsets.type))
-        array_values = array.values[start : array.offsets[-1].as_py()]
+        array_offsets, array_values = _slice_list_array_values_and_rebase_offsets(array)
         return pa.LargeListArray.from_arrays(array_offsets, _e(array_values, feature.feature))
     elif pa.types.is_fixed_size_list(array.type):
         # feature must be List(subfeature)
