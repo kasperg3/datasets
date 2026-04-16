@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 _IMAGE_COMPRESSION_FORMATS: Optional[list[str]] = None
 _NATIVE_BYTEORDER = "<" if sys.byteorder == "little" else ">"
+_IMAGE_PA_TYPE = pa.struct({"bytes": pa.binary(), "path": pa.string()})
+_IMAGE_LARGE_PA_TYPE = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
 # Origin: https://github.com/python-pillow/Pillow/blob/698951e19e19972aeed56df686868f1329981c12/src/PIL/Image.py#L3126 minus "|i1" which values are not preserved correctly when saving and loading an image
 _VALID_IMAGE_ARRAY_DTPYES = [
     np.dtype("|b1"),
@@ -89,11 +91,50 @@ class Image:
     id: Optional[str] = field(default=None, repr=False)
     # Automatically constructed
     dtype: ClassVar[str] = "PIL.Image.Image"
-    pa_type: ClassVar[Any] = pa.struct({"bytes": pa.binary(), "path": pa.string()})
+    pa_type: ClassVar[Any] = _IMAGE_PA_TYPE
     _type: str = field(default="Image", init=False, repr=False)
 
+    def __post_init__(self):
+        self._target_pa_type = self.pa_type
+
     def __call__(self):
-        return self.pa_type
+        return self._target_pa_type
+
+    def _get_target_pa_type(self, storage: Optional[pa.Array] = None) -> pa.StructType:
+        if storage is None:
+            return self._target_pa_type
+        storage_type = storage.type
+        if pa.types.is_large_string(storage_type) or pa.types.is_large_binary(storage_type):
+            return _IMAGE_LARGE_PA_TYPE
+        if pa.types.is_struct(storage_type):
+            has_large_bytes = storage_type.get_field_index("bytes") >= 0 and pa.types.is_large_binary(
+                storage_type.field("bytes").type
+            )
+            has_large_path = storage_type.get_field_index("path") >= 0 and pa.types.is_large_string(
+                storage_type.field("path").type
+            )
+            if has_large_bytes or has_large_path:
+                return _IMAGE_LARGE_PA_TYPE
+        return _IMAGE_PA_TYPE
+
+    def _to_struct_storage(
+        self,
+        *,
+        target_pa_type: pa.StructType,
+        length: int,
+        mask: pa.Array,
+        bytes_array: Optional[pa.Array] = None,
+        path_array: Optional[pa.Array] = None,
+    ) -> pa.StructArray:
+        if bytes_array is None:
+            bytes_array = pa.array([None] * length, type=target_pa_type.field("bytes").type)
+        else:
+            bytes_array = array_cast(bytes_array, target_pa_type.field("bytes").type)
+        if path_array is None:
+            path_array = pa.array([None] * length, type=target_pa_type.field("path").type)
+        else:
+            path_array = array_cast(path_array, target_pa_type.field("path").type)
+        return pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=mask)
 
     def encode_example(self, value: Union[str, bytes, bytearray, dict, np.ndarray, "PIL.Image.Image"]) -> dict:
         """Encode example into a format for Arrow.
@@ -215,11 +256,15 @@ class Image:
         The Arrow types that can be converted to the Image pyarrow storage type are:
 
         - `pa.string()` - it must contain the "path" data
-        - `pa.large_string()` - it must contain the "path" data (will be cast to string if possible)
+        - `pa.large_string()` - it must contain the "path" data
         - `pa.binary()` - it must contain the image bytes
+        - `pa.large_binary()` - it must contain the image bytes
         - `pa.struct({"bytes": pa.binary()})`
+        - `pa.struct({"bytes": pa.large_binary()})`
         - `pa.struct({"path": pa.string()})`
+        - `pa.struct({"path": pa.large_string()})`
         - `pa.struct({"bytes": pa.binary(), "path": pa.string()})`  - order doesn't matter
+        - `pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})`  - order doesn't matter
         - `pa.list(*)` - it must contain the image array data
 
         Args:
@@ -230,47 +275,42 @@ class Image:
             `pa.StructArray`: Array in the Image arrow storage type, that is
                 `pa.struct({"bytes": pa.binary(), "path": pa.string()})`.
         """
-        if pa.types.is_large_string(storage.type):
-            try:
-                storage = storage.cast(pa.string())
-            except pa.ArrowInvalid as e:
-                raise ValueError(
-                    f"Failed to cast large_string to string for Image feature. "
-                    f"This can happen if string values exceed 2GB. "
-                    f"Original error: {e}"
-                ) from e
-        if pa.types.is_string(storage.type):
-            bytes_array = pa.array([None] * len(storage), type=pa.binary())
-            storage = pa.StructArray.from_arrays([bytes_array, storage], ["bytes", "path"], mask=storage.is_null())
+        target_pa_type = self._get_target_pa_type(storage)
+        if pa.types.is_large_string(storage.type) or pa.types.is_string(storage.type):
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type, length=len(storage), mask=storage.is_null(), path_array=storage
+            )
         elif pa.types.is_large_binary(storage.type):
-            storage = array_cast(
-                storage, pa.binary()
-            )  # this can fail in case of big images, paths should be used instead
-            path_array = pa.array([None] * len(storage), type=pa.string())
-            storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type, length=len(storage), mask=storage.is_null(), bytes_array=storage
+            )
         elif pa.types.is_binary(storage.type):
-            path_array = pa.array([None] * len(storage), type=pa.string())
-            storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type, length=len(storage), mask=storage.is_null(), bytes_array=storage
+            )
         elif pa.types.is_struct(storage.type):
-            if storage.type.get_field_index("bytes") >= 0:
-                bytes_array = storage.field("bytes")
-            else:
-                bytes_array = pa.array([None] * len(storage), type=pa.binary())
-            if storage.type.get_field_index("path") >= 0:
-                path_array = storage.field("path")
-            else:
-                path_array = pa.array([None] * len(storage), type=pa.string())
-            storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=storage.is_null())
+            bytes_array = storage.field("bytes") if storage.type.get_field_index("bytes") >= 0 else None
+            path_array = storage.field("path") if storage.type.get_field_index("path") >= 0 else None
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type,
+                length=len(storage),
+                mask=storage.is_null(),
+                bytes_array=bytes_array,
+                path_array=path_array,
+            )
         elif pa.types.is_list(storage.type):
             bytes_array = pa.array(
                 [encode_np_array(np.array(arr))["bytes"] if arr is not None else None for arr in storage.to_pylist()],
-                type=pa.binary(),
+                type=target_pa_type.field("bytes").type,
             )
-            path_array = pa.array([None] * len(storage), type=pa.string())
-            storage = pa.StructArray.from_arrays(
-                [bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null()
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type,
+                length=len(storage),
+                mask=bytes_array.is_null(),
+                bytes_array=bytes_array,
             )
-        return array_cast(storage, self.pa_type)
+        self._target_pa_type = target_pa_type
+        return array_cast(storage, target_pa_type)
 
     def embed_storage(self, storage: pa.StructArray, token_per_repo_id=None) -> pa.StructArray:
         """Embed image files into the Arrow array.
@@ -302,15 +342,21 @@ class Image:
             [
                 (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
                 for x in storage.to_pylist()
-            ],
-            type=pa.binary(),
+            ]
         )
         path_array = pa.array(
             [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
-            type=pa.string(),
         )
-        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null())
-        return array_cast(storage, self.pa_type)
+        target_pa_type = self._get_target_pa_type(storage)
+        storage = self._to_struct_storage(
+            target_pa_type=target_pa_type,
+            length=len(storage),
+            mask=bytes_array.is_null(),
+            bytes_array=bytes_array,
+            path_array=path_array,
+        )
+        self._target_pa_type = target_pa_type
+        return array_cast(storage, target_pa_type)
 
 
 def list_image_compression_formats() -> list[str]:
