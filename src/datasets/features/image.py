@@ -117,6 +117,25 @@ class Image:
                 return _IMAGE_LARGE_PA_TYPE
         return _IMAGE_PA_TYPE
 
+    def _to_struct_storage(
+        self,
+        *,
+        target_pa_type: pa.StructType,
+        length: int,
+        mask: pa.Array,
+        bytes_array: Optional[pa.Array] = None,
+        path_array: Optional[pa.Array] = None,
+    ) -> pa.StructArray:
+        if bytes_array is None:
+            bytes_array = pa.array([None] * length, type=target_pa_type.field("bytes").type)
+        else:
+            bytes_array = array_cast(bytes_array, target_pa_type.field("bytes").type)
+        if path_array is None:
+            path_array = pa.array([None] * length, type=target_pa_type.field("path").type)
+        else:
+            path_array = array_cast(path_array, target_pa_type.field("path").type)
+        return pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=mask)
+
     def encode_example(self, value: Union[str, bytes, bytearray, dict, np.ndarray, "PIL.Image.Image"]) -> dict:
         """Encode example into a format for Arrow.
 
@@ -256,46 +275,40 @@ class Image:
             `pa.StructArray`: Array in the Image arrow storage type, that is
                 `pa.struct({"bytes": pa.binary(), "path": pa.string()})`.
         """
-        if pa.types.is_large_string(storage.type):
-            target_pa_type = self._get_target_pa_type(storage)
-            bytes_array = pa.array([None] * len(storage), type=target_pa_type.field("bytes").type)
-            storage = pa.StructArray.from_arrays([bytes_array, storage], ["bytes", "path"], mask=storage.is_null())
-        if pa.types.is_string(storage.type):
-            target_pa_type = self._get_target_pa_type(storage)
-            bytes_array = pa.array([None] * len(storage), type=target_pa_type.field("bytes").type)
-            storage = pa.StructArray.from_arrays([bytes_array, storage], ["bytes", "path"], mask=storage.is_null())
+        target_pa_type = self._get_target_pa_type(storage)
+        if pa.types.is_large_string(storage.type) or pa.types.is_string(storage.type):
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type, length=len(storage), mask=storage.is_null(), path_array=storage
+            )
         elif pa.types.is_large_binary(storage.type):
-            target_pa_type = self._get_target_pa_type(storage)
-            path_array = pa.array([None] * len(storage), type=target_pa_type.field("path").type)
-            storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type, length=len(storage), mask=storage.is_null(), bytes_array=storage
+            )
         elif pa.types.is_binary(storage.type):
-            target_pa_type = self._get_target_pa_type(storage)
-            path_array = pa.array([None] * len(storage), type=target_pa_type.field("path").type)
-            storage = pa.StructArray.from_arrays([storage, path_array], ["bytes", "path"], mask=storage.is_null())
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type, length=len(storage), mask=storage.is_null(), bytes_array=storage
+            )
         elif pa.types.is_struct(storage.type):
-            target_pa_type = self._get_target_pa_type(storage)
-            if storage.type.get_field_index("bytes") >= 0:
-                bytes_array = storage.field("bytes")
-            else:
-                bytes_array = pa.array([None] * len(storage), type=target_pa_type.field("bytes").type)
-            if storage.type.get_field_index("path") >= 0:
-                path_array = storage.field("path")
-            else:
-                path_array = pa.array([None] * len(storage), type=target_pa_type.field("path").type)
-            bytes_array = array_cast(bytes_array, target_pa_type.field("bytes").type)
-            path_array = array_cast(path_array, target_pa_type.field("path").type)
-            storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=storage.is_null())
+            bytes_array = storage.field("bytes") if storage.type.get_field_index("bytes") >= 0 else None
+            path_array = storage.field("path") if storage.type.get_field_index("path") >= 0 else None
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type,
+                length=len(storage),
+                mask=storage.is_null(),
+                bytes_array=bytes_array,
+                path_array=path_array,
+            )
         elif pa.types.is_list(storage.type):
-            target_pa_type = self._get_target_pa_type(storage)
             bytes_array = pa.array(
                 [encode_np_array(np.array(arr))["bytes"] if arr is not None else None for arr in storage.to_pylist()],
                 type=target_pa_type.field("bytes").type,
             )
-            path_array = pa.array([None] * len(storage), type=target_pa_type.field("path").type)
-            storage = pa.StructArray.from_arrays(
-                [bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null()
+            storage = self._to_struct_storage(
+                target_pa_type=target_pa_type,
+                length=len(storage),
+                mask=bytes_array.is_null(),
+                bytes_array=bytes_array,
             )
-        target_pa_type = self._get_target_pa_type(storage)
         self._target_pa_type = target_pa_type
         return array_cast(storage, target_pa_type)
 
@@ -335,9 +348,13 @@ class Image:
             [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
         )
         target_pa_type = self._get_target_pa_type(storage)
-        bytes_array = array_cast(bytes_array, target_pa_type.field("bytes").type)
-        path_array = array_cast(path_array, target_pa_type.field("path").type)
-        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null())
+        storage = self._to_struct_storage(
+            target_pa_type=target_pa_type,
+            length=len(storage),
+            mask=bytes_array.is_null(),
+            bytes_array=bytes_array,
+            path_array=path_array,
+        )
         self._target_pa_type = target_pa_type
         return array_cast(storage, target_pa_type)
 
