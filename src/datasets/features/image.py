@@ -24,7 +24,9 @@ if TYPE_CHECKING:
 
 _IMAGE_COMPRESSION_FORMATS: Optional[list[str]] = None
 _NATIVE_BYTEORDER = "<" if sys.byteorder == "little" else ">"
-_IMAGE_PA_TYPE = pa.struct({"bytes": pa.binary(), "path": pa.string()})
+# Default to large binary/string for Image to avoid ChunkedArray issues on large datasets.
+# See https://github.com/huggingface/datasets/issues/5717
+_IMAGE_PA_TYPE = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
 _IMAGE_LARGE_PA_TYPE = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
 
 
@@ -317,18 +319,35 @@ class Image:
                 return f.read()
 
         target_pa_type = _get_target_pa_type(storage)
-        bytes_array = pa.array(
-            [
-                (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
-                for x in storage.to_pylist()
-            ],
-            type=target_pa_type.field("bytes").type,
-        )
-        path_array = pa.array(
-            [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
-            type=target_pa_type.field("path").type,
-        )
-        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=bytes_array.is_null())
+        embedded_bytes = [
+            (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
+            for x in storage.to_pylist()
+        ]
+        path_values = [
+            os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()
+        ]
+
+        bytes_array = pa.array(embedded_bytes, type=target_pa_type.field("bytes").type)
+        path_array = pa.array(path_values, type=target_pa_type.field("path").type)
+
+        # Large batches can exceed binary/string offset limits and yield ChunkedArray outputs.
+        # Promote to large types globally if any array chunked out to ensure consistent schema.
+        if isinstance(bytes_array, pa.ChunkedArray) or isinstance(path_array, pa.ChunkedArray):
+            target_pa_type = _IMAGE_LARGE_PA_TYPE
+            bytes_array = pa.array(embedded_bytes, type=target_pa_type.field("bytes").type)
+            path_array = pa.array(path_values, type=target_pa_type.field("path").type)
+
+        # Combine chunks (if any) to produce a plain Array for StructArray.from_arrays.
+        if isinstance(bytes_array, pa.ChunkedArray):
+            bytes_array = bytes_array.combine_chunks()
+        if isinstance(path_array, pa.ChunkedArray):
+            path_array = path_array.combine_chunks()
+
+        mask = bytes_array.is_null()
+        if isinstance(mask, pa.ChunkedArray):
+            mask = mask.combine_chunks()
+
+        storage = pa.StructArray.from_arrays([bytes_array, path_array], ["bytes", "path"], mask=mask)
         self._target_pa_type = target_pa_type
         return array_cast(storage, target_pa_type)
 
