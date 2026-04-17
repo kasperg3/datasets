@@ -2,9 +2,6 @@
 *.lock
 !dvc.lock
 
-# Git worktrees
-.worktrees/
-
 # Extracted dummy data
 datasets/**/dummy_data-zip-extracted/
 
