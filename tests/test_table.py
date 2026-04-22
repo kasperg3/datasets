@@ -1403,6 +1403,19 @@ def test_embed_table_storage(image_file):
     assert isinstance(embedded_images_table.to_pydict()["image"][0]["bytes"], bytes)
 
 
+def test_cast_then_embed_table_storage_keeps_image_schema_stable(image_file):
+    features = Features({"image": Image()})
+    legacy_schema = pa.schema({"image": pa.struct({"bytes": pa.binary(), "path": pa.string()})})
+    legacy_table = pa.table({"image": [{"bytes": None, "path": image_file}]}, schema=legacy_schema)
+
+    casted_table = table_cast(legacy_table, features.arrow_schema)
+    embedded_table = embed_table_storage(casted_table)
+
+    assert casted_table.schema == features.arrow_schema
+    assert embedded_table.schema == features.arrow_schema
+    assert isinstance(embedded_table.to_pydict()["image"][0]["bytes"], bytes)
+
+
 @pytest.mark.parametrize(
     "table",
     [

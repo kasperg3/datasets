@@ -24,14 +24,12 @@ if TYPE_CHECKING:
 
 _IMAGE_COMPRESSION_FORMATS: Optional[list[str]] = None
 _NATIVE_BYTEORDER = "<" if sys.byteorder == "little" else ">"
-# Default to large binary/string for Image to avoid ChunkedArray issues on large datasets.
-# See https://github.com/huggingface/datasets/issues/5717
-_IMAGE_PA_TYPE = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
+_IMAGE_PA_TYPE = pa.struct({"bytes": pa.binary(), "path": pa.string()})
 _IMAGE_LARGE_PA_TYPE = pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
 
 
 def _get_target_pa_type(storage: pa.Array) -> pa.StructType:
-    """Return _IMAGE_LARGE_PA_TYPE if storage uses large binary/string types, else _IMAGE_PA_TYPE."""
+    """Return large Image storage type only when the input storage requires it."""
     t = storage.type
     if pa.types.is_large_string(t) or pa.types.is_large_binary(t):
         return _IMAGE_LARGE_PA_TYPE
@@ -253,7 +251,8 @@ class Image:
 
         Returns:
             `pa.StructArray`: Array in the Image arrow storage type, that is
-                `pa.struct({"bytes": pa.binary(), "path": pa.string()})`.
+                `pa.struct({"bytes": pa.binary(), "path": pa.string()})` or
+                `pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})`.
         """
         target_pa_type = _get_target_pa_type(storage)
         if pa.types.is_string(storage.type) or pa.types.is_large_string(storage.type):
@@ -301,7 +300,8 @@ class Image:
 
         Returns:
             `pa.StructArray`: Array in the Image arrow storage type, that is
-                `pa.struct({"bytes": pa.binary(), "path": pa.string()})`.
+                `pa.struct({"bytes": pa.binary(), "path": pa.string()})` or
+                `pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})`.
         """
         if token_per_repo_id is None:
             token_per_repo_id = {}
@@ -330,8 +330,7 @@ class Image:
         bytes_array = pa.array(embedded_bytes, type=target_pa_type.field("bytes").type)
         path_array = pa.array(path_values, type=target_pa_type.field("path").type)
 
-        # Large batches can exceed binary/string offset limits and yield ChunkedArray outputs.
-        # Promote to large types globally if any array chunked out to ensure consistent schema.
+        # If offsets exceed small binary/string limits, promote to large types.
         if isinstance(bytes_array, pa.ChunkedArray) or isinstance(path_array, pa.ChunkedArray):
             target_pa_type = _IMAGE_LARGE_PA_TYPE
             bytes_array = pa.array(embedded_bytes, type=target_pa_type.field("bytes").type)

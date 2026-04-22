@@ -403,6 +403,33 @@ def test_writer_embed_local_files(tmp_path, embed_local_files):
         assert out["image"][0]["bytes"] is None
 
 
+@require_pil
+def test_writer_embed_local_files_keeps_image_schema_pinned(tmp_path):
+    import PIL.Image
+
+    image_path = str(tmp_path / "test_image_rgb.jpg")
+    PIL.Image.fromarray(np.zeros((5, 5), dtype=np.uint8)).save(image_path, format="png")
+    output = pa.BufferOutputStream()
+    features = Features({"image": Image()})
+    legacy_schema = pa.schema({"image": pa.struct({"bytes": pa.binary(), "path": pa.string()})})
+    legacy_table = pa.table({"image": [{"bytes": None, "path": image_path}]}, schema=legacy_schema)
+
+    with ParquetWriter(stream=output, features=features, embed_local_files=True) as writer:
+        writer.write_table(legacy_table)
+        writer.write_table(legacy_table)
+        writer.finalize()
+        assert writer._schema.field("image").type == Image.pa_type
+
+    pa_table = pq.read_table(pa.BufferReader(output.getvalue()))
+    assert pa_table.schema.field("image").type == Image.pa_type
+    out = pa_table.to_pydict()["image"]
+    assert len(out) == 2
+    with open(image_path, "rb") as f:
+        expected_bytes = f.read()
+    assert out[0]["path"] == "test_image_rgb.jpg"
+    assert out[0]["bytes"] == expected_bytes
+
+
 def test_always_nullable():
     non_nullable_schema = pa.schema([pa.field("col_1", pa.string(), nullable=False)])
     output = pa.BufferOutputStream()

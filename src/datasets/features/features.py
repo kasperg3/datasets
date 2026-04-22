@@ -1612,6 +1612,29 @@ def generate_from_arrow_type(pa_type: pa.DataType) -> FeatureType:
         raise ValueError(f"Cannot convert {pa_type} to a Feature type.")
 
 
+def _is_legacy_or_large_image_storage(pa_type: pa.DataType) -> bool:
+    if not isinstance(pa_type, pa.StructType):
+        return False
+    field_names = set(pa_type.names)
+    if not field_names or not field_names <= {"bytes", "path"}:
+        return False
+    if "bytes" in field_names and not (
+        pa.types.is_binary(pa_type.field("bytes").type) or pa.types.is_large_binary(pa_type.field("bytes").type)
+    ):
+        return False
+    if "path" in field_names and not (
+        pa.types.is_string(pa_type.field("path").type) or pa.types.is_large_string(pa_type.field("path").type)
+    ):
+        return False
+    return True
+
+
+def _is_metadata_feature_compatible_with_field(feature: Any, field: pa.Field) -> bool:
+    if get_nested_type(feature) == field.type:
+        return True
+    return isinstance(feature, Image) and _is_legacy_or_large_image_storage(field.type)
+
+
 def numpy_to_pyarrow_listarray(arr: np.ndarray, type: pa.DataType = None) -> pa.ListArray:
     """Build a PyArrow ListArray from a multidimensional NumPy array"""
     arr = np.array(arr)
@@ -1947,7 +1970,11 @@ class Features(dict):
         obj = {
             field.name: (
                 metadata_features[field.name]
-                if field.name in metadata_features and metadata_features_schema.field(field.name) == field
+                if field.name in metadata_features
+                and (
+                    metadata_features_schema.field(field.name) == field
+                    or _is_metadata_feature_compatible_with_field(metadata_features[field.name], field)
+                )
                 else generate_from_arrow_type(field.type)
             )
             for field in pa_schema

@@ -97,6 +97,37 @@ def test_image_cast_storage_with_large_struct():
     assert casted.to_pylist() == [{"bytes": b"abc", "path": "/tmp/image.jpg"}]
 
 
+def test_image_cast_storage_uses_large_only_when_needed():
+    image = Image()
+    casted_from_large_binary = image.cast_storage(pa.array([b"abc"], type=pa.large_binary()))
+    casted_from_binary = image.cast_storage(pa.array([b"abc"], type=pa.binary()))
+
+    assert casted_from_large_binary.type == pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
+    assert casted_from_binary.type == pa.struct({"bytes": pa.binary(), "path": pa.string()})
+    assert image() == pa.struct({"bytes": pa.binary(), "path": pa.string()})
+
+
+def test_image_embed_storage_uses_large_only_when_needed():
+    image = Image()
+    legacy_storage = pa.array(
+        [{"bytes": b"abc", "path": None}],
+        type=pa.struct({"bytes": pa.binary(), "path": pa.string()}),
+    )
+    large_storage = pa.array(
+        [{"bytes": b"abc", "path": None}],
+        type=pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()}),
+    )
+
+    embedded_legacy = image.embed_storage(legacy_storage)
+    embedded_large = image.embed_storage(large_storage)
+    recasted = image.cast_storage(legacy_storage)
+
+    assert embedded_legacy.type == pa.struct({"bytes": pa.binary(), "path": pa.string()})
+    assert embedded_large.type == pa.struct({"bytes": pa.large_binary(), "path": pa.large_string()})
+    assert recasted.type == pa.struct({"bytes": pa.binary(), "path": pa.string()})
+    assert image() == pa.struct({"bytes": pa.binary(), "path": pa.string()})
+
+
 @require_pil
 @pytest.mark.parametrize(
     "build_example",
@@ -412,6 +443,24 @@ def test_dataset_concatenate_nested_image_features(shared_datadir):
         concatenated_dataset[1]["list_of_structs_of_images"][0]["image"]
         == dset2[0]["list_of_structs_of_images"][0]["image"]
     )
+
+
+def test_dataset_concatenate_legacy_and_large_image_features():
+    image_feature = Features({"image": Image()})
+    legacy_schema = pa.schema({"image": pa.struct({"bytes": pa.binary(), "path": pa.string()})}).with_metadata(
+        image_feature.arrow_schema.metadata
+    )
+    legacy_table = pa.table({"image": [{"bytes": None, "path": "legacy.jpg"}]}, schema=legacy_schema)
+    legacy_dataset = Dataset(legacy_table)
+
+    large_dataset = Dataset.from_dict(
+        {"image": [{"bytes": None, "path": "large.jpg"}]},
+        features=image_feature,
+    )
+
+    concatenated_dataset = concatenate_datasets([legacy_dataset, large_dataset])
+    assert concatenated_dataset.features == image_feature
+    assert concatenated_dataset.data.schema.field("image").type == Image.pa_type
 
 
 @require_pil
