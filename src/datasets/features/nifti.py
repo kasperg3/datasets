@@ -10,6 +10,7 @@ from ..download.download_config import DownloadConfig
 from ..table import array_cast
 from ..utils.file_utils import is_local_path, xopen
 from ..utils.py_utils import no_op_if_value_is_null, string_to_dict
+from ._binary_size import check_pa_binary_fits
 
 
 if TYPE_CHECKING:
@@ -236,13 +237,12 @@ class Nifti:
             with xopen(path, "rb", download_config=download_config) as f:
                 return f.read()
 
-        bytes_array = pa.array(
-            [
-                (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
-                for x in storage.to_pylist()
-            ],
-            type=pa.binary(),
-        )
+        _bytes_list = [
+            (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
+            for x in storage.to_pylist()
+        ]
+        check_pa_binary_fits(_bytes_list, feature_name="Nifti")
+        bytes_array = pa.array(_bytes_list, type=pa.binary())
         path_array = pa.array(
             [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
             type=pa.string(),

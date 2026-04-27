@@ -11,6 +11,7 @@ import pyarrow as pa
 import pytest
 
 from datasets import Column, Dataset, Features, Image, List, Value, concatenate_datasets, load_dataset
+from datasets.features import image as image_module
 from datasets.features.image import encode_np_array, image_to_bytes
 
 from ..utils import require_pil
@@ -675,6 +676,28 @@ def test_image_embed_storage(shared_datadir):
     embedded_storage = Image().embed_storage(storage)
     embedded_example = embedded_storage.to_pylist()[0]
     assert embedded_example == {"bytes": open(image_path, "rb").read(), "path": "test_image_rgb.jpg"}
+
+
+def test_image_embed_storage_fails_on_chunked_binary_array(monkeypatch):
+    # Regression test for issue #5717: when pa.array(..., type=pa.binary()) returns
+    # a ChunkedArray, bytes_array.is_null() is also chunked and StructArray.from_arrays fails.
+    storage = pa.array(
+        [{"bytes": b"abc", "path": None}],
+        type=pa.struct({"bytes": pa.binary(), "path": pa.string()}),
+    )
+
+    original_pa_array = image_module.pa.array
+
+    def pa_array_returning_chunked_binary(*args, **kwargs):
+        out = original_pa_array(*args, **kwargs)
+        if kwargs.get("type") == pa.binary() and isinstance(out, pa.Array):
+            return pa.chunked_array([out])
+        return out
+
+    monkeypatch.setattr(image_module.pa, "array", pa_array_returning_chunked_binary)
+
+    with pytest.raises(TypeError, match="Mask must be a pyarrow.Array of type boolean"):
+        Image().embed_storage(storage)
 
 
 @require_pil
