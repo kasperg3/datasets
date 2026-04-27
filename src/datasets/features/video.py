@@ -11,7 +11,7 @@ from ..download.download_config import DownloadConfig
 from ..table import array_cast
 from ..utils.file_utils import is_local_path, xopen
 from ..utils.py_utils import no_op_if_value_is_null, string_to_dict
-from ._binary_size import check_pa_binary_fits
+from ._binary_size import binary_array_or_overflow
 
 
 if TYPE_CHECKING:
@@ -319,12 +319,13 @@ class Video:
             with xopen(path, "rb", download_config=download_config) as f:
                 return f.read()
 
-        _bytes_list = [
-            (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
-            for x in storage.to_pylist()
-        ]
-        check_pa_binary_fits(_bytes_list, feature_name="Video")
-        bytes_array = pa.array(_bytes_list, type=pa.binary())
+        bytes_array = binary_array_or_overflow(
+            [
+                (path_to_bytes(x["path"]) if x["bytes"] is None else x["bytes"]) if x is not None else None
+                for x in storage.to_pylist()
+            ],
+            feature_name="Video",
+        )
         path_array = pa.array(
             [os.path.basename(path) if path is not None else None for path in storage.field("path").to_pylist()],
             type=pa.string(),

@@ -1,25 +1,26 @@
-_PA_BINARY_MAX_BYTES = (1 << 31) - 1
+import pyarrow as pa
 
 
-def check_pa_binary_fits(byte_objects, feature_name: str) -> None:
-    """Raise OverflowError if the bytes would not fit in a single pa.binary() array."""
-    total = 0
-    n_non_null = 0
-    largest = 0
-    for b in byte_objects:
-        if b is None:
-            continue
-        size = len(b)
-        total += size
-        n_non_null += 1
-        if size > largest:
-            largest = size
-    if total > _PA_BINARY_MAX_BYTES:
-        avg = total // n_non_null if n_non_null else 0
-        raise OverflowError(
-            f"[{feature_name}] cannot fit {total:,} bytes across {n_non_null} non-null row(s) into a single "
-            f"pa.binary() array (limit {_PA_BINARY_MAX_BYTES:,} bytes / 2 GiB; largest row = {largest:,} bytes, "
-            f"average = {avg:,} bytes). Reduce writer_batch_size so each batch stays under 2 GiB, or keep paths "
-            f"instead of embedding bytes (do not call save_to_disk/push_to_hub after cast_column to bytes for very "
-            f"large media)."
-        )
+_OVERFLOW_MSG = (
+    "[{feature_name}] embedded bytes exceed the 2 GiB pa.binary() limit for a single "
+    "Arrow array. Reduce `writer_batch_size` so each batch stays under 2 GiB, or keep "
+    "paths instead of embedding bytes for very large media."
+)
+
+
+def binary_array_or_overflow(values, feature_name: str) -> pa.Array:
+    """Build a `pa.binary()` array from values, or raise `OverflowError` when the total
+    bytes exceed the 2 GiB int32-offset limit of `pa.binary()`.
+
+    Two failure modes are normalized into the same `OverflowError`:
+    - Older PyArrow: `pa.array(..., type=pa.binary())` raises `pa.ArrowInvalid`.
+    - Newer PyArrow: it returns a `pa.ChunkedArray`, which would break the downstream
+      `pa.StructArray.from_arrays(..., mask=...)` call (issue #5717).
+    """
+    try:
+        arr = pa.array(values, type=pa.binary())
+    except pa.ArrowInvalid as e:
+        raise OverflowError(_OVERFLOW_MSG.format(feature_name=feature_name)) from e
+    if isinstance(arr, pa.ChunkedArray):
+        raise OverflowError(_OVERFLOW_MSG.format(feature_name=feature_name))
+    return arr
