@@ -1940,7 +1940,12 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
 
     @staticmethod
     def _save_to_disk_single(job_id: int, shard: "Dataset", fpath: str, storage_options: Optional[dict]):
-        batch_size = config.DEFAULT_MAX_BATCH_SIZE
+        from .arrow_writer import get_arrow_writer_batch_size_from_features
+
+        # embed_storage runs per batch during save, and its peak memory scales with
+        # batch size. For features with large payloads (Image/Audio/Video/binary),
+        # the helper returns a smaller batch (100 for image/audio, 10 for video).
+        batch_size = get_arrow_writer_batch_size_from_features(shard.features) or config.DEFAULT_MAX_BATCH_SIZE
 
         num_examples_progress_update = 0
         writer = ArrowWriter(
