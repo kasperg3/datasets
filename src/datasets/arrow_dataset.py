@@ -5397,7 +5397,7 @@ class Dataset(DatasetInfoMixin, IndexableMixin, TensorflowDatasetMixin):
         >>> ds.to_dict()
         ```
         """
-        return query_table(
+        result = query_table(
             table=self._data,
             key=slice(0, len(self)),
             indices=self._indices,
